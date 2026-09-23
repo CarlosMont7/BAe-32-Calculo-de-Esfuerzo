@@ -1,6 +1,14 @@
 import streamlit as st
 import pandas as pd
 import re
+import io
+
+# Importaciones para generación de PDF con ReportLab
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 st.set_page_config(page_title="Planificador BAe-32", layout="wide")
 st.title("✈️ Planificador de Vuelo - Jetstream BAe-32")
@@ -74,6 +82,9 @@ if st.session_state.get("fase2_activa", False):
     rem_actual_lbs = remanente_inicial_mision
     total_recargado_L = 0.0
 
+    # Estructura para almacenar resultados para el PDF
+    datos_pdf_logistica = []
+
     for i, row in df_fase1.iterrows():
         c1, c2, c3, c4, c5, c6, c7 = st.columns([0.7, 1.1, 1.6, 1.1, 1.4, 1.3, 3.2])
         
@@ -114,19 +125,29 @@ if st.session_state.get("fase2_activa", False):
         if total_bordo > (CAPACIDAD_MAX_LBS + 5):
             exceso_lbs = total_bordo - CAPACIDAD_MAX_LBS
             exceso_litros = exceso_lbs / DENSIDAD_LBS_L
-            c7.error(f"🔴 EXCEDE. Reduce {exceso_litros:.0f} L")
+            estado_str = f"EXCEDE. Reduce {exceso_litros:.0f} L"
+            c7.error(f"🔴 {estado_str}")
             rem_actual_lbs = total_bordo - req_lbs
         elif total_bordo < req_lbs:
-            # Nuevo cálculo para indicar la cantidad exacta que falta
             faltante_lbs = req_lbs - total_bordo
             faltante_L = faltante_lbs / DENSIDAD_LBS_L
-            c7.error(f"🔴 FALTANTE. Carga {faltante_L:.0f} L más")
+            estado_str = f"FALTANTE. Carga {faltante_L:.0f} L más"
+            c7.error(f"🔴 {estado_str}")
             rem_actual_lbs = 0
         else:
             rem_final_lbs = total_bordo - req_lbs
             rem_final_L = rem_final_lbs / DENSIDAD_LBS_L
-            c7.success(f"✅ Final: {rem_final_lbs:.0f} lbs / {rem_final_L:.0f} L")
+            estado_str = f"Final: {rem_final_lbs:.0f} lbs / {rem_final_L:.0f} L"
+            c7.success(f"✅ {estado_str}")
             rem_actual_lbs = rem_final_lbs 
+
+        datos_pdf_logistica.append([
+            row['Origen'], 
+            f"{rem_actual_lbs:.0f} lbs", 
+            f"{req_L:.0f} L", 
+            f"{recargue_L:.0f} L", 
+            estado_str
+        ])
 
     # ------------------------------------------
     # Fila extra: Destino Final (Reposición)
@@ -169,12 +190,97 @@ if st.session_state.get("fase2_activa", False):
     if saldo_absoluto_lbs > (CAPACIDAD_MAX_LBS + 5):
         exceso_lbs = saldo_absoluto_lbs - CAPACIDAD_MAX_LBS
         exceso_litros = exceso_lbs / DENSIDAD_LBS_L
-        c7.error(f"🔴 EXCEDE. Reduce {exceso_litros:.0f} L")
+        estado_final_str = f"EXCEDE. Reduce {exceso_litros:.0f} L"
+        c7.error(f"🔴 {estado_final_str}")
     else:
         texto_final = f"Final: {saldo_absoluto_lbs:.0f} lbs / {saldo_absoluto_L:.0f} L"
         if combustible_pendiente_L > 5:
-            c7.warning(f"⚠️ Faltan {combustible_pendiente_L:.0f} L | {texto_final}")
+            estado_final_str = f"Faltan {combustible_pendiente_L:.0f} L | {texto_final}"
+            c7.warning(f"⚠️ {estado_final_str}")
         elif combustible_pendiente_L < -5:
-            c7.info(f"ℹ️ Sobran {abs(combustible_pendiente_L):.0f} L | {texto_final}")
+            estado_final_str = f"Sobran {abs(combustible_pendiente_L):.0f} L | {texto_final}"
+            c7.info(f"ℹ️ {estado_final_str}")
         else:
-            c7.success(f"🎯 Cuadrado | {texto_final}")
+            estado_final_str = f"Cuadrado | {texto_final}"
+            c7.success(f"🎯 {estado_final_str}")
+
+    datos_pdf_logistica.append([
+        f"{destino_final} (Base)", 
+        f"{rem_actual_lbs:.0f} lbs", 
+        "0 L", 
+        f"{recargue_final_L:.0f} L", 
+        estado_final_str
+    ])
+
+    # ==========================================
+    # GENERADOR DE PDF
+    # ==========================================
+    def generar_pdf():
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+        elements = []
+        
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'TitleStyle',
+            parent=styles['Heading1'],
+            fontSize=16,
+            textColor=colors.HexColor('#1f77b4'),
+            spaceAfter=12
+        )
+        subtitle_style = ParagraphStyle(
+            'SubTitleStyle',
+            parent=styles['Heading2'],
+            fontSize=12,
+            textColor=colors.HexColor('#333333'),
+            spaceAfter=8
+        )
+        normal_style = styles['Normal']
+        
+        # Encabezado del reporte
+        elements.append(Paragraph("PLAN DE JUSTIFICACIÓN Y LOGÍSTICA DE COMBUSTIBLE", title_style))
+        elements.append(Paragraph("Aeronave: Jetstream BAe-32 | Consumo Base: 466 L/hr", subtitle_style))
+        elements.append(Spacer(1, 10))
+        
+        # Resumen general
+        resumen_texto = f"<b>Combustible Total Requerido para la Misión:</b> {req_total_mision_L:.0f} Litros ({req_total_mision_L * DENSIDAD_LBS_L:.0f} lbs)"
+        elements.append(Paragraph(resumen_texto, normal_style))
+        elements.append(Spacer(1, 15))
+        
+        # Tabla de Logística para PDF
+        elements.append(Paragraph("Desglose Logístico por Tramo", subtitle_style))
+        
+        table_data = [["Aeródromo", "Rem. Inicial", "Requerido", "Recargue", "Estado / Saldo Final"]]
+        for fila in datos_pdf_logistica:
+            table_data.append(fila)
+            
+        t = Table(table_data, colWidths=[1.2*inch, 1.2*inch, 1.1*inch, 1.1*inch, 2.4*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1f77b4')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,0), 9),
+            ('BOTTOMPADDING', (0,0), (-1,0), 6),
+            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#f9f9f9')),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#dddddd')),
+            ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
+            ('FONTSIZE', (0,1), (-1,-1), 8),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        
+        elements.append(t)
+        doc.build(elements)
+        buffer.seek(0)
+        return buffer
+
+    st.markdown("---")
+    # Botón de descarga de PDF en Streamlit
+    pdf_data = generar_pdf()
+    st.download_button(
+        label="📥 Descargar Planificación en PDF",
+        data=pdf_data,
+        file_name="planificacion_combustible_bae32.pdf",
+        mime="application/pdf",
+        type="primary"
+    )
